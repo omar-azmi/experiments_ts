@@ -1,4 +1,4 @@
-import { pathToPosixPath, trimDotSlashes } from "@oazmi/kitchensink/pathman"
+import { parseFilepathInfo, pathToPosixPath, trimDotSlashes } from "@oazmi/kitchensink/pathman"
 import esbuild from "esbuild"
 import fs from "node:fs/promises"
 
@@ -91,11 +91,21 @@ const workerPluginSetup = (config: Require<Partial<WorkerPluginSetupConfig>, "se
 	let asset_id_counter = 0
 
 	return async (build: esbuild.PluginBuild): Promise<void> => {
-		const
-			{ plugins = [], assetNames: initial_assetNames = "[name]-[hash]", entryPoints: _0, ...rest_initial_options } = build.initialOptions,
-			initial_plugins = usePlugins
-				? plugins.filter((initial_plugin) => (initial_plugin !== selfPlugin))
-				: []
+		const {
+			plugins: initial_plugins = [],
+			assetNames: initial_assetNames = "[name]-[hash]", // the default value will intentionally throw an error. see the notice below.
+			outdir: initial_outdir,
+			outfile: initial_outfile = "./dist/output.js", // this is just a fallback value in case both `outdir` and `outfile` were not defined.
+			entryPoints: _0,
+			...rest_initial_options
+		} = build.initialOptions
+
+		const plugins = usePlugins
+			? initial_plugins.filter((initial_plugin) => (initial_plugin !== selfPlugin))
+			: []
+
+		// compute the `outdir` for the results of the sub-build, depending on whether the user had originally used "outdir" or "outfile".
+		const outdir = initial_outdir ?? (parseFilepathInfo(initial_outfile).dirpath)
 
 		// NOTICE: the default value that we set for `initial_assetNames` is intentionally made so that it raises an error.
 		//   this is because multi-asset bundle files will have their references break if there isn't a consistency between the internal build's and the user's top-level build config.
@@ -142,8 +152,9 @@ const workerPluginSetup = (config: Require<Partial<WorkerPluginSetupConfig>, "se
 			// with a variable pertaining to the relative path to the bundled worker file.
 			const result = await build.esbuild.build({
 				...rest_initial_options,
-				plugins: initial_plugins,
+				plugins: plugins,
 				entryPoints: [path],
+				outdir: outdir,
 				// overwriting the asset-names and entry-names, so that they reflect exactly what the user's top-level build-config has, in addition to the hash.
 				// if this step is not performed, the links/references generated from this sub-build will not be correct when the user's top-level build moves around the resulting files.
 				// thus, we must imitate the same exact same structure as the user's top-level config (excluding the hash).
@@ -209,7 +220,7 @@ const workerPluginSetup = (config: Require<Partial<WorkerPluginSetupConfig>, "se
 			assets_importer_js_lines.push(`export { ${entry_points_asset_ids.map((asset_id) => ("asset_" + asset_id)).join(", ")} }`)
 			const default_export_asset_id = entry_points_asset_ids.at(0)
 			if (default_export_asset_id !== undefined) { assets_importer_js_lines.push(`export default asset_${default_export_asset_id}`) }
-			// console.log(Object.entries(result.metafile.outputs).map(([k, v]) => k))
+
 			const contents = assets_importer_js_lines.join("\n")
 			return { contents, loader: "js", pluginData: { ...pluginData, [REQUIRES_ADDITIONAL_ASSETS_RESOLVER]: true } }
 		})
@@ -280,8 +291,9 @@ await esbuild.build({
 		".txt": "file", // <-- needed for the file-path import performed by the "./src/demo_worker.ts" worker file.
 	},
 	outdir: dist_dir,
+	// outfile: "./dist/index.js", // if you only have a single entry-point, you can specify `outfile` instead of `outdir`.
 	// asset-names MUST be specified, and it may NOT contain the "[hash]" label, because that will break the references generated in the sub-build.
-	assetNames: "[ext]/[name]",
+	assetNames: "assets/[name]", // another good possibility is `"[ext]/[name]"`, but then sourcemaps will not work in that one.
 	format: "esm",
 	bundle: true,
 	splitting: false,
