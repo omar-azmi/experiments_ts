@@ -1,7 +1,16 @@
 import { parseFilepathInfo, pathToPosixPath, trimDotSlashes } from "@oazmi/kitchensink/pathman"
 import esbuild from "esbuild"
+import { getBuildExtensions } from "esbuild-extra"
 import fs from "node:fs/promises"
 
+
+interface MetaUrlResolverPluginSetup {
+	pluginName: string
+}
+
+const defaultMetaUrlResolverPluginSetup: MetaUrlResolverPluginSetup = {
+	pluginName: "oazmi-meta-url-resolver",
+}
 
 interface WorkerPluginSetupConfig {
 	/** the path-name filters which should be used for capturing worker scripts.
@@ -77,6 +86,40 @@ const pathStemMatches = (path: string, stems: Array<string>): boolean => {
 	return false
 }
 
+const metaUrlResolverPluginSetup = (config?: Partial<MetaUrlResolverPluginSetup>) => {
+	const { pluginName } = { ...defaultMetaUrlResolverPluginSetup, ...config }
+
+	return async (build: esbuild.PluginBuild) => {
+		const
+			superBuild = getBuildExtensions(build, pluginName),
+			meta_url_pattern = /new\s+URL\(\s*(?<quote>["'])(?<importPath>.*?)\k<quote>,\s*import\.meta\.url\s*\)/g
+
+		superBuild.onTransform({ loaders: ["ts", "tsx", "js", "jsx"] }, async (args) => {
+			const { loader, code } = args
+			if (!code.match(meta_url_pattern)) { return }
+
+			let var_counter = 0
+			const
+				additional_imports: Array<{ varName: string, pathName: string }> = [],
+				modified_code = code.replaceAll(meta_url_pattern, (_full_match, ...args): string => {
+					const
+						[named_groups, _full_string, _offset, ..._unused_groups] = args.toReversed(),
+						pathName = named_groups.importPath as string,
+						varName = `__WORKER_URL_${var_counter++}`
+					additional_imports.push({ varName, pathName })
+					return varName
+				}),
+				worker_url_import_statements = additional_imports.map(({ varName, pathName }) => {
+					return `import ${varName} from "${pathName}" with { type: "monaco-worker" }`
+				})
+			return {
+				loader: loader,
+				code: worker_url_import_statements.join("\n") + "\n" + modified_code,
+			}
+		})
+	}
+}
+
 const workerPluginSetup = (config: Require<Partial<WorkerPluginSetupConfig>, "selfPlugin">) => {
 	const
 		{ filters, withFilter, namespaceFilter, rename, usePlugins, selfPlugin } = { ...defaultWorkerPluginSetupConfig, ...config },
@@ -91,6 +134,8 @@ const workerPluginSetup = (config: Require<Partial<WorkerPluginSetupConfig>, "se
 	let asset_id_counter = 0
 
 	return async (build: esbuild.PluginBuild): Promise<void> => {
+		const superBuild = getBuildExtensions(build, selfPlugin.name)
+
 		const {
 			plugins: initial_plugins = [],
 			assetNames: initial_assetNames = "[name]-[hash]", // the default value will intentionally throw an error. see the notice below.
@@ -145,7 +190,7 @@ const workerPluginSetup = (config: Require<Partial<WorkerPluginSetupConfig>, "se
 			})
 		})
 
-		build.onLoad({ filter: /.*/, namespace: plugin_ns }, async (args): Promise<esbuild.OnLoadResult> => {
+		superBuild.onLoad({ filter: /.*/, namespace: plugin_ns }, async (args): Promise<esbuild.OnLoadResult> => {
 			const { path, pluginData } = args
 			// here, we bundle the captured worker separately, as a single file,
 			// then, with the "file" loader, we inform esbuild to swap out the import-statement in the dependent(s) of this worker,
@@ -225,7 +270,7 @@ const workerPluginSetup = (config: Require<Partial<WorkerPluginSetupConfig>, "se
 			return { contents, loader: "js", pluginData: { ...pluginData, [REQUIRES_ADDITIONAL_ASSETS_RESOLVER]: true } }
 		})
 
-		build.onResolve({ filter: /.*/, namespace: plugin_ns }, async (args): Promise<esbuild.OnResolveResult | undefined> => {
+		superBuild.onResolve({ filter: /.*/, namespace: plugin_ns }, async (args): Promise<esbuild.OnResolveResult | undefined> => {
 			const { path: asset_id, pluginData = {} } = args
 			if (!pluginData[REQUIRES_ADDITIONAL_ASSETS_RESOLVER]) { return undefined }
 			const
@@ -240,7 +285,7 @@ const workerPluginSetup = (config: Require<Partial<WorkerPluginSetupConfig>, "se
 			}
 		})
 
-		build.onLoad({ filter: /.*/, namespace: assets_plugin_ns }, async (args): Promise<esbuild.OnLoadResult> => {
+		superBuild.onLoad({ filter: /.*/, namespace: assets_plugin_ns }, async (args): Promise<esbuild.OnLoadResult> => {
 			const
 				{ path, pluginData = {} } = args,
 				asset_file = pluginData[PLUGIN_DATA_ASSET_FILE_FIELD] as (esbuild.OutputFile | undefined)
@@ -252,6 +297,13 @@ const workerPluginSetup = (config: Require<Partial<WorkerPluginSetupConfig>, "se
 			//   doing so would significantly reduce the polluting "__commonJS" and "__toESM" statemetns that end up in the user's original entry-point.
 			return { contents: asset_file.contents, loader: "file" }
 		})
+	}
+}
+
+const metaUrlResolverPlugin = (config?: Partial<MetaUrlResolverPluginSetup>) => {
+	return {
+		name: config?.pluginName ?? defaultMetaUrlResolverPluginSetup.pluginName,
+		setup: metaUrlResolverPluginSetup(config),
 	}
 }
 
@@ -280,11 +332,14 @@ await esbuild.build({
 		"./src/index.ts",
 		"./src/index.html",
 	],
-	plugins: [workerPlugin({
-		filters: [/.*/],
-		// below, we specify that only `import ... from "..." with { type: "monaco-worker" }` should be processed.
-		withFilter: (with_arg) => (with_arg.type === "monaco-worker"),
-	})],
+	plugins: [
+		metaUrlResolverPlugin(),
+		workerPlugin({
+			filters: [/.*/],
+			// below, we specify that only `import ... from "..." with { type: "monaco-worker" }` should be processed.
+			withFilter: (with_arg) => (with_arg.type === "monaco-worker"),
+		}),
+	],
 	loader: {
 		".ttf": "copy", // <-- this loader-rule is crucial for bundling the monaco-editor.
 		".html": "copy", // <-- this allows us to copy the "./src/index.html" file as is.
