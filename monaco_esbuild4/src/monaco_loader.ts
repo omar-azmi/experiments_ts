@@ -33,7 +33,7 @@ import editorWorkerUrl from "monaco-editor/esm/vs/editor/editor.worker.js" with 
 import cssWorkerUrl from "monaco-editor/esm/vs/language/css/css.worker.js" with { type: "monaco-worker" }
 const htmlWorkerUrl = new URL("monaco-editor/esm/vs/language/html/html.worker.js", import.meta.url).toString()
 const jsonWorkerUrl = new URL("monaco-editor/esm/vs/language/json/json.worker.js", import.meta.url).toString()
-const tsWorkerUrl = new URL("monaco-editor/esm/vs/language/typescript/ts.worker.js", import.meta.url).toString()
+const tsWorkerUrl = import.meta.resolve("monaco-editor/esm/vs/language/typescript/ts.worker.js")
 const demoWorkerUrl = new URL("./demo_worker.ts", import.meta.url).toString()
 // importing the monaco editor itself
 import { editor as monacoEditor, languages as monacoLanguages, type Environment } from "monaco-editor"

@@ -1,6 +1,6 @@
 import esbuild from "esbuild"
 import fs from "node:fs/promises"
-import { metaUrlTransformerPlugin } from "./plugins/meta_url_transformer.ts"
+import { metaUrlTransformerPlugin, type MetaUrlTransformerPluginSetup, type MetaUrlTransformResult } from "./plugins/meta_url_transformer.ts"
 import { workerBundlerPlugin } from "./plugins/worker_bundler.ts"
 
 
@@ -12,6 +12,17 @@ const emptyDir = async (dir_path: string): Promise<void> => {
 	await fs.mkdir(dir_path)
 }
 
+const worker_import_url_transformer: MetaUrlTransformerPluginSetup["transform"] = (matched_substring: string, regex_args: any[], index: number): MetaUrlTransformResult => {
+	const
+		[named_groups, _full_string, _offset, ..._unused_groups] = regex_args.toReversed(),
+		path_name = named_groups.importPath as string,
+		var_name = `__WORKER_URL_${index}`
+	return {
+		prepend: `import ${var_name} from "${path_name}" with { type: "monaco-worker"}`,
+		replace: `import.meta.resolve(${var_name})`,
+	}
+}
+
 const dist_dir = "./dist/"
 await emptyDir(dist_dir)
 await esbuild.build({
@@ -20,7 +31,16 @@ await esbuild.build({
 		"./src/index.html",
 	],
 	plugins: [
-		metaUrlTransformerPlugin(),
+		// this transforms `import.meta.resolve("...")` to a top-level import statement: `import __WORKER_URL_0 from "..." with { type: "monaco-worker" }`
+		metaUrlTransformerPlugin({
+			pattern: /import\.meta\.resolve\s*\(\s*(?<quote>["'])(?<importPath>.*?)\k<quote>\s*\)/g,
+			transform: worker_import_url_transformer,
+		}),
+		// this transforms `new URL("...", import.meta.url) to a top-level import statement: `import __WORKER_URL_0 from "..." with { type: "monaco-worker" }`
+		metaUrlTransformerPlugin({
+			transform: worker_import_url_transformer,
+		}),
+		// this captures all `import XYZ from "..." with { type: "monaco-worker" }` statements, and bundles them up separately
 		workerBundlerPlugin({
 			filters: [/.*/],
 			// below, we specify that only `import ... from "..." with { type: "monaco-worker" }` should be processed.
